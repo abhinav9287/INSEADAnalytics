@@ -1,0 +1,590 @@
+---
+title: "Breast Cancer Market segmentation"
+author: "Group 5"
+output:
+  pdf_document:
+    includes:
+      in_header: ../../AnalyticsStyles/default.sty
+  html_document:
+    css: ../../AnalyticsStyles/default.css
+    theme: paper
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+always_allow_html: yes
+---
+
+<!-- **Note:** Assuming the working directory is "MYDIRECTORY/INSEADAnalytics" (where you have cloned the course material), you can create an html file by running in your console the command (pay attention to the directory you are in, check it using getwd()) rmarkdown::render("CourseSessions/InClassProcess/MarketSegmentationProcessInClass.Rmd") -->
+
+All material and code is available at the INSEAD Data Science for Business website and GitHub. Before starting, make sure you have pulled the [course files](https://github.com/InseadDataAnalytics/INSEADAnalytics) on your GitHub repository. As always, you can use the `help` command in Rstudio to find out about any R function (e.g. type `help(list.files)` to learn what the R function `list.files` does).
+
+**Note:** you can create an html file by running in your console the command 
+rmarkdown::render("CourseSessions/InClassProcess/MarketSegmentationProcessInClass.Rmd") 
+(see also a [potential issue with plots](https://github.com/InseadDataAnalytics/INSEADAnalytics/issues/75))
+
+<hr>\clearpage
+
+# The Business Questions
+
+This process can be used as a (starting) template for projects like the one described in the [Boats cases A](http://inseaddataanalytics.github.io/INSEADAnalytics/Boats-A-prerelease.pdf) and  [B](http://inseaddataanalytics.github.io/INSEADAnalytics/Boats-B-prerelease.pdf). For example (but not only), in this case some of the business questions were: 
+
+- What are the main purchase drivers of the customers (and prospects) of this company? 
+
+- Are there different market segments? Which ones? Do the purchase drivers differ across segments? 
+
+- What (possibly market segment specific) product development or brand positioning strategy should the company follow in order to increase its sales? 
+
+See for example some of the analysis of this case in  these slides: <a href="http://inseaddataanalytics.github.io/INSEADAnalytics/Sessions2_3 Handouts.pdf"  target="_blank"> part 1</a> and <a href="http://inseaddataanalytics.github.io/INSEADAnalytics/Sessions4_5 Handouts.pdf"  target="_blank"> part 2</a>.
+
+<hr>\clearpage
+```{r setuplibraries, echo=FALSE, message=FALSE}
+if("pacman" %in% rownames(installed.packages()) == FALSE) {install.packages("pacman")} # Check if you have universal installer package, install if not
+
+pacman::p_load("caret","ROCR","lift","glmnet","MASS","e1071") #Check, and if needed install the necessary packages
+
+breastcancerdata<-read.csv(file.choose("C:/Users/sophi/OneDrive/Documentos/04. P3/01. Data Science for Business/00. Assignments/02. Credit Default Modelling/6722-credit-card-default-data.csv"), na.strings=c(""," ","NA"), header=TRUE, stringsAsFactors = TRUE) # Load the datafile to R
+library(dplyr, warn.conflicts = FALSE)
+
+
+str(breastcancerdata) # See if some data types were misclassified when importing data from CSV
+
+# Fixing incorrectly classified data types:
+breastcancerdata$diagnosis <- as.factor(breastcancerdata$diagnosis)
+
+
+str(breastcancerdata)
+
+
+set.seed(5) #set a random number generation seed to ensure that the split is the same everytime
+inTrain <- createDataPartition(y = breastcancerdata$diagnosis,
+                               p = 456/569, list = FALSE)
+training <- breastcancerdata[ inTrain,]
+testing <- breastcancerdata[ -inTrain,]
+
+
+################################################################################
+#CTREE MODEL
+
+pacman::p_load("caret","partykit","ROCR","lift","rpart","e1071")
+
+ctree_tree<-ctree(diagnosis~.- id,data=training) #Run ctree on training data
+plot(ctree_tree, gp = gpar(fontsize = 8)) #Plotting the tree (adjust fontsize if needed)
+
+ctree_probabilities<-predict(ctree_tree,newdata=testing,type="prob") #Predict probabilities
+ctree_classification<-rep("1",112)
+ctree_classification[ctree_probabilities[,2]<0.8]="0" 
+ctree_classification<-as.factor(ctree_classification)
+colnames(ctree_probabilities)[max.col(ctree_probabilities)]
+###Confusion matrix
+ctree_classification<-droplevels(ctree_classification)
+confusionMatrix(ctree_classification,testing$diagnosis,positive = "0")
+#crossvalidation
+####ROC Curve
+ctree_probabilities_testing <-predict(ctree_tree,newdata=testing,type = "prob") #Predict probabilities
+ctree_pred_testing <- prediction(ctree_probabilities_testing[,2], testing$diagnosis) #Calculate errors
+ctree_ROC_testing <- performance(ctree_pred_testing,"tpr","fpr") #Create ROC curve data
+plot(ctree_ROC_testing) #Plot ROC curve
+
+#K-cross validation
+k=10 # number of folds
+folds=sample(rep_len(1:k,nrow(breastcancerdata))) # generate random fold indices
+table(folds)
+
+Acc=c() # define accuracy vector
+for(i in 1:k){
+  Fit.ctree=ctree(diagnosis~.,data=breastcancerdata[folds!=i,]) # fit model on all folds except fold i
+  pred=predict(Fit.ctree,newdata=breastcancerdata[folds==i,])  # predict class for fold i
+  Acc[i]=sum(pred==breastcancerdata$diagnosis[folds==i])/length(breastcancerdata$diagnosis[folds==i]) # accuracy for fold i
+}
+
+Acc
+
+mean(Acc)
+
+##LOOCV
+
+ctrl <- trainControl(method = "LOOCV")
+model <- train(diagnosis~., data = breastcancerdata, method = "ctree", trControl = ctrl)
+
+
+print(model)
+####AUC (area under curve)
+auc.tmp <- performance(ctree_pred_testing,"auc") #Create AUC data
+ctree_auc_testing <- as.numeric(auc.tmp@y.values) #Calculate AUC
+ctree_auc_testing #Display AUC value: 90+% - excellent, 80-90% - very good, 70-80% - good, 60-70% - so so, below 60% - not much value
+
+
+
+################################################################################
+#RPART MODEL
+
+CART_cp = rpart.control(cp = 0.0005) #set cp to a small number to "grow" a large tree
+
+rpart_tree<-rpart(diagnosis~.-id,data=training, method="class", control=CART_cp) #"Grow" a tree on training data
+
+prunned_rpart_tree<-prune(rpart_tree, cp=0.0005) #Prun the tree. Play with cp to see how the resultant tree changes
+plot(as.party(prunned_rpart_tree), type = "extended",gp = gpar(fontsize = 7)) #Plotting the tree (adjust fontsize if needed)
+
+# Understand the relationship between the cross-validated error, size of the tree and cp.
+plotcp(rpart_tree) # Use printcp(rpart_tree) to print the values. As a rule of thumb pick up the largest cp which does not give a substantial drop in error
+
+rpart_prediction_class<-predict(prunned_rpart_tree,newdata=testing, type="class") #Predict classification (for confusion matrix)
+confusionMatrix(rpart_prediction_class,testing$diagnosis,positive = "0") #Display confusion matrix
+
+rpart_probabilities_testing <-predict(prunned_rpart_tree,newdata=testing,type = "prob") #Predict probabilities
+rpart_pred_testing <- prediction(rpart_probabilities_testing[,2], testing$diagnosis) #Calculate errors
+rpart_ROC_testing <- performance(rpart_pred_testing,"tpr","fpr") #Create ROC curve data
+plot(rpart_ROC_testing) #Plot ROC curve
+auc.tmp <- performance(rpart_pred_testing,"auc") #Create AUC data
+rpart_auc_testing <- as.numeric(auc.tmp@y.values) #Calculate AUC
+rpart_auc_testing #Display AUC value
+
+
+
+################################################################################
+#RANDOM FOREST
+
+if("pacman" %in% rownames(installed.packages()) == FALSE) {install.packages("pacman")} # Check if you have universal installer package, install if not
+
+pacman::p_load("caret","ROCR","lift","randomForest") #Check, and if needed install the necessary packages
+
+# Load the data, correct mis-classified datafields, fixNAs -- same as you did in the logistic regression file
+# To ensure "appled-to-apples" comparisons with logistic regression, use the same training and testing -- the code below only works in the same R session after you've ran the logistic regression code
+
+model_forest <- randomForest(diagnosis~ ., data=training, 
+                             type="classification",
+                             importance=TRUE,
+                             ntree = 500,           # hyperparameter: number of trees in the forest
+                             mtry = 10,             # hyperparameter: number of random columns to grow each tree
+                             nodesize = 10,         # hyperparameter: min number of datapoints on the leaf of each tree
+                             maxnodes = 10,         # hyperparameter: maximum number of leafs of a tree
+                             cutoff = c(0.5, 0.5)   # hyperparameter: how the voting works; (0.5, 0.5) means majority vote
+) 
+
+plot(model_forest)  # plots error as a function of number of trees in the forest; use print(model_forest) to print the values on the plot
+
+varImpPlot(model_forest) # plots variable importances; use importance(model_forest) to print the values
+
+###Finding predicitons: probabilities and classification
+forest_probabilities<-predict(model_forest,newdata=testing,type="prob") #Predict probabilities -- an array with 2 columns: for not retained (class 0) and for retained (class 1)
+forest_classification<-rep("1",112)
+forest_classification[forest_probabilities[,2]<0.9]="0" #Predict classification using 0.5 threshold. Why 0.5 and not 0.6073? Use the same as in cutoff above
+forest_classification<-as.factor(forest_classification)
+
+confusionMatrix(forest_classification,testing$diagnosis, positive="0") #Display confusion matrix.
+
+```
+
+
+# PCA analysis
+
+We will use PCA analysis and clusterization to determine the most important variables related to a higher probability of a maligned breast cancer diagnosis.
+
+```{r setuplibraries, echo=FALSE, message=FALSE}
+suppressWarnings(source("../../AnalyticsLibraries/library.R"))
+# Package options
+#suppressWarnings(ggthemr('fresh'))  # ggplot theme
+opts_knit$set(progress=FALSE, verbose=FALSE)
+opts_chunk$set(echo=FALSE, fig.align="center", fig.width=10, fig.height=6.35, results="asis")
+options(knitr.kable.NA = '')
+
+# Run below only once, then comment out
+# New versions of the networkD3 package may not work properly, so install the following version
+#packageurl <- "https://cran.r-project.org/src/contrib/Archive/networkD3/networkD3_0.2.13.tar.gz"
+#install.packages(packageurl, repos=NULL, type="source")
+```
+
+<hr>\clearpage
+
+# The Data
+
+First we load the data to use (see the raw .Rmd file to change the data file as needed):
+
+```{r setupdata1E, echo=TRUE, tidy=TRUE}
+# Please ENTER the name of the file with the data used. The file should be a .csv with one row per observation (e.g. person) and one column per attribute. Do not add .csv at the end, make sure the data are numeric.
+datafile_name = "../Sessions23/data/Breastcanceradjusteddata.csv"
+
+# Please enter the minimum number below which you would like not to print - this makes the readability of the tables easier. Default values are either 10e6 (to print everything) or 0.5. Try both to see the difference.
+MIN_VALUE = 0.5
+
+# Please enter the maximum number of observations to show in the report and slides. 
+# DEFAULT is 10. If the number is large the report may be slow.
+max_data_report = 10
+```
+
+```{r}
+ProjectData <- read.csv(datafile_name)
+ProjectData <- data.matrix(ProjectData) 
+ProjectData_INITIAL <- ProjectData
+
+```
+
+<hr>\clearpage
+
+# Part 1: Key Customer Characteristics
+
+```{r setupfactor, echo=TRUE, tidy=TRUE}
+# Please ENTER the original raw attributes to use. 
+# Please use numbers, not column names, e.g. c(1:5, 7, 8) uses columns 1,2,3,4,5,7,8
+factor_attributes_used = c(3:30)
+
+# Please ENTER the selection criteria for the factors to use. 
+# Choices: "eigenvalue", "variance", "manual"
+factor_selectionciterion = "manual"
+
+# Please ENTER the desired minimum variance explained 
+# (Only used in case "variance" is the factor selection criterion used). 
+minimum_variance_explained = 65  # between 1 and 100
+
+# Please ENTER the number of factors to use 
+# (Only used in case "manual" is the factor selection criterion used).
+manual_numb_factors_used = 2
+
+# Please ENTER the rotation eventually used (e.g. "none", "varimax", "quatimax", "promax", "oblimin", "simplimax", and "cluster" - see help(principal)). Default is "varimax"
+rotation_used = "varimax"
+
+```
+
+```{r}
+factor_attributes_used <- intersect(factor_attributes_used, 1:ncol(ProjectData))
+ProjectDataFactor <- ProjectData[,factor_attributes_used]
+ProjectDataFactor <- data.matrix(ProjectDataFactor)
+```
+
+## Steps 1-2: Check the Data 
+
+```{r}
+rownames(ProjectDataFactor) <- paste0("Obs.", sprintf("%02i", 1:nrow(ProjectDataFactor)))
+iprint.df(t(head(round(ProjectDataFactor, 2), max_data_report)))
+```
+
+The data we use here have the following descriptive statistics: 
+
+```{r}
+iprint.df(round(my_summary(ProjectDataFactor), 2))
+```
+
+## Step 3: Check Correlations
+
+This is the correlation matrix of the customer responses to the `r ncol(ProjectDataFactor)` attitude questions - which are the only questions that we will use for the segmentation (see the case):
+
+```{r}
+thecor = round(cor(ProjectDataFactor),2)
+iprint.df(round(thecor,2), scale=TRUE)
+write.csv(round(thecor,2), file = "thecor.csv")
+```
+
+## Step 4: Choose number of factors
+
+To select the number of variables we used the manual method considering only 3 factors 
+
+```{r}
+# Here is how the `principal` function is used 
+UnRotated_Results<-principal(ProjectDataFactor, nfactors=ncol(ProjectDataFactor), rotate="none",score=TRUE)
+UnRotated_Factors<-round(UnRotated_Results$loadings,2)
+UnRotated_Factors<-as.data.frame(unclass(UnRotated_Factors))
+colnames(UnRotated_Factors)<-paste("Comp",1:ncol(UnRotated_Factors),sep="")
+```
+
+```{r}
+# Here is how we use the `PCA` function 
+Variance_Explained_Table_results<-PCA(ProjectDataFactor, graph=FALSE)
+Variance_Explained_Table<-Variance_Explained_Table_results$eig
+Variance_Explained_Table_copy<-Variance_Explained_Table
+
+rownames(Variance_Explained_Table) <- paste("Component", 1:nrow(Variance_Explained_Table), sep=" ")
+colnames(Variance_Explained_Table) <- c("Eigenvalue", "Pct of explained variance", "Cumulative pct of explained variance")
+```
+
+Let's look at the **variance explained** as well as the **eigenvalues** (see session readings):
+
+```{r}
+iprint.df(round(Variance_Explained_Table, 2))
+write.csv(round(Variance_Explained_Table,2), file = "Variance_Explained_Table.csv")
+
+```
+
+```{r}
+eigenvalues  <- Variance_Explained_Table[, "Eigenvalue"]
+df           <- cbind(as.data.frame(eigenvalues), c(1:length(eigenvalues)), rep(1, length(eigenvalues))) 
+colnames(df) <- c("eigenvalues", "components", "abline")
+iplot.df(melt(df, id="components"))
+```
+
+
+## Step 5: Interpret the factors
+
+
+```{r}
+if (factor_selectionciterion == "eigenvalue")
+  factors_selected = sum(Variance_Explained_Table_copy[,1] >= 1)
+if (factor_selectionciterion == "variance")
+  factors_selected = 1:head(which(Variance_Explained_Table_copy[,"cumulative percentage of variance"]>= minimum_variance_explained),1)
+if (factor_selectionciterion == "manual")
+  factors_selected = manual_numb_factors_used
+```
+
+To better visualize them, we will use what is called a "rotation". There are many rotation methods. In this case we selected the `r rotation_used` rotation. For our data, the `r factors_selected` selected factors look as follows after this rotation: 
+
+```{r}
+Rotated_Results<-principal(ProjectDataFactor, nfactors=max(factors_selected), rotate=rotation_used,score=TRUE)
+Rotated_Factors<-round(Rotated_Results$loadings,2)
+Rotated_Factors<-as.data.frame(unclass(Rotated_Factors))
+colnames(Rotated_Factors)<-paste("Comp.",1:ncol(Rotated_Factors),sep="")
+
+sorted_rows <- sort(Rotated_Factors[,1], decreasing = TRUE, index.return = TRUE)$ix
+Rotated_Factors <- Rotated_Factors[sorted_rows,]
+
+iprint.df(Rotated_Factors, scale=TRUE)
+write.csv(Rotated_Factors, file = "Rotated_Factors.csv")
+
+```
+
+To better visualize and interpret the factors we often "suppress" loadings with small values, e.g. with absolute values smaller than 0.5. In this case our factors look as follows after suppressing the small numbers:
+
+```{r}
+Rotated_Factors_thres <- Rotated_Factors
+Rotated_Factors_thres[abs(Rotated_Factors_thres) < MIN_VALUE]<-NA
+colnames(Rotated_Factors_thres)<- colnames(Rotated_Factors)
+rownames(Rotated_Factors_thres)<- rownames(Rotated_Factors)
+
+iprint.df(Rotated_Factors_thres, scale=TRUE)
+write.csv(Rotated_Factors_thres, file = "Rotated_Factors_thres.csv")
+
+```
+
+*
+
+## Step 6:  Save factor scores 
+
+We can now either replace all initial variables used in this part with the factor scores, or just select one of the initial variables for each of the selected factors in order to represent that factor. Here is how the factor scores  are for the first few respondents:
+
+```{r}
+NEW_ProjectData <- round(Rotated_Results$scores[,1:factors_selected,drop=F],2)
+colnames(NEW_ProjectData)<-paste("DV (Factor)",1:ncol(NEW_ProjectData),sep=" ")
+
+iprint.df(t(head(NEW_ProjectData, 10)), scale=TRUE)
+write.csv(NEW_ProjectData, file = "FactorScores.csv")
+
+```
+
+*
+*
+*
+*
+
+<hr>\clearpage
+
+# Part 2: Customer Segmentation 
+
+A key family of methods used for segmentation is what is called **clustering methods**. This is a very important problem in statistics and **machine learning**, used in all sorts of applications such as in [Amazon's pioneer work on recommender systems](http://www.cs.umd.edu/~samir/498/Amazon-Recommendations.pdf). There are many *mathematical methods* for clustering. We will use two very standard methods, **hierarchical clustering** and **k-means**. While the "math" behind all these methods can be complex, the R functions used are relatively simple to use, as we will see. 
+
+(All user inputs for this part should be selected in the code chunk in the raw .Rmd file) 
+
+```{r setupcluster, echo=TRUE, tidy=TRUE}
+# Please ENTER then original raw attributes to use for the segmentation (the "segmentation attributes")
+# Please use numbers, not column names, e.g. c(1:5, 7, 8) uses columns 1,2,3,4,5,7,8
+segmentation_attributes_used = c(2:30) #c(10,19,5,12,3) 
+
+# Please ENTER then original raw attributes to use for the profiling of the segments (the "profiling attributes")
+# Please use numbers, not column names, e.g. c(1:5, 7, 8) uses columns 1,2,3,4,5,7,8
+profile_attributes_used = c(2:30) 
+
+# Please ENTER the number of clusters to eventually use for this report
+numb_clusters_used = 3 # We use two to consider both diagnosis
+
+# Please enter the method to use for the segmentation:
+profile_with = "hclust" #  "hclust" or "kmeans"
+
+# Please ENTER the distance metric eventually used for the clustering in case of hierarchical clustering 
+# (e.g. "euclidean", "maximum", "manhattan", "canberra", "binary" or "minkowski" - see help(dist)). 
+# DEFAULT is "euclidean"
+distance_used = "euclidean"
+
+# Please ENTER the hierarchical clustering method to use (options are:
+# "ward.D", "ward.D2", "single", "complete", "average", "mcquitty", "median" or "centroid").
+# DEFAULT is "ward"
+hclust_method = "ward.D2"
+
+# Please ENTER the kmeans clustering method to use (options are:
+# "Hartigan-Wong", "Lloyd", "Forgy", "MacQueen").
+# DEFAULT is "Lloyd"
+kmeans_method = "Lloyd"
+
+```
+
+```{r}
+# Same as the initial data
+ProjectData <- ProjectData_INITIAL
+
+segmentation_attributes_used <- intersect(segmentation_attributes_used, 1:ncol(ProjectData))
+profile_attributes_used <- intersect(profile_attributes_used, 1:ncol(ProjectData))
+
+ProjectData_segment <- ProjectData[,segmentation_attributes_used]
+ProjectData_profile <- ProjectData[,profile_attributes_used]
+
+ProjectData_scaled <- apply(ProjectData, 2, function(r) if (sd(r)!=0) (r-mean(r))/sd(r) else 0*r)
+```
+
+## Steps 1-2: Explore the data
+
+
+## Step 3. Select Segmentation Variables
+
+
+## Step 4: Define similarity measure
+
+We need to define a distance metric that measures how different people (observations in general) are from each other. This can be an important choice. Here are the differences between the observations using the distance metric we selected:
+
+```{r}
+euclidean_pairwise <- as.matrix(dist(head(ProjectData_segment, max_data_report), method="euclidean"))
+euclidean_pairwise <- euclidean_pairwise*lower.tri(euclidean_pairwise) + euclidean_pairwise*diag(euclidean_pairwise) + 10e10*upper.tri(euclidean_pairwise)
+euclidean_pairwise[euclidean_pairwise==10e10] <- NA
+rownames(euclidean_pairwise) <- colnames(euclidean_pairwise) <- sprintf("Obs.%02d", 1:max_data_report)
+
+iprint.df(round(euclidean_pairwise))
+```
+
+## Step 5: Visualize Pair-wise Distances
+
+We can see the histogram of, say, the first 2 variables (can you change the code chunk in the raw .Rmd file to see other variables?)
+
+```{r}
+variables_to_plot = 1:2
+do.call(iplot.grid, lapply(variables_to_plot, function(n){
+  iplot.hist(ProjectData_segment[, n], breaks=10, xlab = paste("Variable", n))
+}))
+```
+
+or the histogram of all pairwise distances for the `r distance_used` distance:
+
+```{r}
+Pairwise_Distances <- dist(ProjectData_segment, method = distance_used) 
+iplot.hist(Pairwise_Distances, breaks=10)
+```
+
+## Step 6: Method and Number of Segments
+
+We need to select the clustering method to use, as well as the number of cluster. It may be useful to see the dendrogram from Hierarchical Clustering, to have a quick idea of how the data may be segmented and how many segments there may be. Here is the dendrogram for our data:
+
+```{r}
+Hierarchical_Cluster_distances <- dist(ProjectData_segment, method=distance_used)
+Hierarchical_Cluster <- hclust(Hierarchical_Cluster_distances, method=hclust_method)
+# Display dendogram
+iplot.dendrogram(Hierarchical_Cluster)
+# TODO: Draw dendogram with red borders around the 3 clusters
+#rect.hclust(Hierarchical_Cluster, k=numb_clusters_used, border="red") 
+```
+
+We can also plot the "distances" traveled before we need to merge any of the lower and smaller in size clusters into larger ones - the heights of the tree branches that link the clusters as we traverse the tree from its leaves to its root. If we have n observations, this plot has n-1 numbers, we see the first 20 here. 
+```{r}
+num <- nrow(ProjectData) - 1
+df1 <- cbind(as.data.frame(Hierarchical_Cluster$height[length(Hierarchical_Cluster$height):1]), c(1:num))
+colnames(df1) <- c("distances","index")
+iplot.df(melt(head(df1, 20), id="index"), xlab="Number of Components")
+```
+
+Here is the segment membership of the first `r max_data_report` respondents if we use hierarchical clustering:
+
+```{r}
+cluster_memberships_hclust <- as.vector(cutree(Hierarchical_Cluster, k=numb_clusters_used)) # cut tree into as many clusters as numb_clusters_used
+cluster_ids_hclust=unique(cluster_memberships_hclust)
+
+ProjectData_with_hclust_membership <- cbind(1:length(cluster_memberships_hclust),cluster_memberships_hclust)
+colnames(ProjectData_with_hclust_membership)<-c("Observation Number","Cluster_Membership")
+
+iprint.df(round(head(ProjectData_with_hclust_membership, max_data_report), 2))
+write.csv(round(ProjectData_with_hclust_membership, 2), file = "ProjectData_with_hclust_membership.csv")
+
+```
+
+while this is the segment membership if we use k-means:
+
+```{r}
+kmeans_clusters <- kmeans(ProjectData_segment,centers= numb_clusters_used, iter.max=2000, algorithm=kmeans_method)
+
+ProjectData_with_kmeans_membership <- cbind(1:length(kmeans_clusters$cluster),kmeans_clusters$cluster)
+colnames(ProjectData_with_kmeans_membership)<-c("Observation Number","Cluster_Membership")
+
+iprint.df(round(head(ProjectData_with_kmeans_membership, max_data_report), 2))
+write.csv(round(ProjectData_with_kmeans_membership, 2), file = "ProjectData_with_kmeans_membership.csv")
+
+```
+
+## Step 7: Profile and interpret the segments 
+
+In market segmentation one may use variables to **profile** the segments which are not the same (necessarily) as those used to **segment** the market: the latter may be, for example, attitude/needs related (you define segments based on what the customers "need"), while the former may be any information that allows a company to identify the defined customer segments (e.g. demographics, location, etc). Of course deciding which variables to use for segmentation and which to use for profiling (and then **activation** of the segmentation for business purposes) is largely subjective.  In this case we can use all survey questions for profiling for now - the `profile_attributes_used` variables selected below. 
+
+There are many ways to do the profiling of the segments. For example, here we show how the *average* answers of the respondents *in each segment* compare to the *average answer of all respondents* using the ratio of the two.  The idea is that if in a segment the average response to a question is very different (e.g. away from ratio of 1) than the overall average, then that question may indicate something about the segment relative to the total population. 
+
+Here are for example the profiles of the segments using the clusters found above.  First let's see just the average answer people gave to each question for the different segments as well as the total population:
+
+```{r}
+cluster_memberships_kmeans <- kmeans_clusters$cluster 
+cluster_ids_kmeans <- unique(cluster_memberships_kmeans)
+
+if (profile_with == "hclust"){
+  cluster_memberships <- cluster_memberships_hclust
+  cluster_ids <-  cluster_ids_hclust  
+}
+if (profile_with == "kmeans"){
+  cluster_memberships <- cluster_memberships_kmeans
+  cluster_ids <-  cluster_ids_kmeans
+}
+
+# WE WILL USE THESE IN THE CLASSIFICATION PART LATER
+NewData = matrix(cluster_memberships,ncol=1)
+
+population_average = matrix(apply(ProjectData_profile, 2, mean), ncol=1)
+colnames(population_average) <- "Population"
+Cluster_Profile_mean <- sapply(sort(cluster_ids), function(i) apply(ProjectData_profile[(cluster_memberships==i), ], 2, mean))
+if (ncol(ProjectData_profile) <2)
+  Cluster_Profile_mean=t(Cluster_Profile_mean)
+colnames(Cluster_Profile_mean) <- paste("Seg.", 1:length(cluster_ids), sep="")
+cluster.profile <- cbind (population_average,Cluster_Profile_mean)
+
+iprint.df(round(cluster.profile, 2))
+write.csv(round(cluster.profile, 2), file = "cluster.profile.csv")
+
+```
+
+We can also "visualize" the segments using **snake plots** for each cluster. For example, we can plot the means of the profiling variables for each of our clusters to better visualize differences between segments. For better visualization we plot the standardized profiling variables.
+
+```{r}
+ProjectData_scaled_profile = ProjectData_scaled[, profile_attributes_used,drop=F]
+
+Cluster_Profile_standar_mean <- sapply(sort(cluster_ids), function(i) apply(ProjectData_scaled_profile[(cluster_memberships==i), ,drop = F], 2, mean))
+if (ncol(ProjectData_scaled_profile) < 2)
+  Cluster_Profile_standar_mean = t(Cluster_Profile_standar_mean)
+colnames(Cluster_Profile_standar_mean) <- paste("Seg ", 1:length(cluster_ids), sep="")
+
+iplot.df(melt(cbind.data.frame(idx=as.numeric(1:nrow(Cluster_Profile_standar_mean)), Cluster_Profile_standar_mean), id="idx"), xlab="Profiling variables (standardized)",  ylab="Mean of cluster")
+
+write.csv(round(Cluster_Profile_standar_mean, 2), file = "Cluster_Profile_standar_mean.csv")
+
+```
+
+We can also compare the averages of the profiling variables of each segment relative to the average of the variables across the whole population. This can also help us better understand whether  there are indeed clusters in our data (e.g. if all segments are much like the overall population, there may be no segments). For example, we can measure the ratios of the average for each cluster to the average of the population, minus 1, (e.g. `avg(cluster)` `/` `avg(population)` `-1`) for each segment and variable:
+
+```{r}
+population_average_matrix <- population_average[,"Population",drop=F] %*% matrix(rep(1,ncol(Cluster_Profile_mean)),nrow=1)
+cluster_profile_ratios <- (ifelse(population_average_matrix==0, 0,Cluster_Profile_mean/population_average_matrix))
+colnames(cluster_profile_ratios) <- paste("Seg.", 1:ncol(cluster_profile_ratios), sep="")
+rownames(cluster_profile_ratios) <- colnames(ProjectData)[profile_attributes_used]
+## printing the result in a clean-slate table
+iprint.df(round(cluster_profile_ratios-1, 2))
+
+```
+
+
+
+## Step 8: Robustness Analysis
+
+We should also consider the robustness of our analysis as we change the clustering method and parameters. Once we are comfortable with the solution we can finally answer our first business questions: 
+
+
+*
+*
+
+<hr>\clearpage
